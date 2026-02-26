@@ -8,6 +8,8 @@ Uses BeautifulSoup for HTML parsing and content extraction.
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 from typing import Any
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
@@ -27,6 +29,24 @@ BROWSER_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
+
+
+def _resolves_to_private_ip(hostname: str) -> bool:
+    """Check whether *hostname* resolves to a private or reserved IP address.
+
+    Returns ``True`` if **any** resolved address is private, reserved,
+    loopback, or link-local — blocking SSRF attempts against internal
+    services (e.g. cloud metadata endpoints, localhost admin panels).
+    """
+    try:
+        addrinfo = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+        for _family, _type, _proto, _canonname, sockaddr in addrinfo:
+            addr = ipaddress.ip_address(sockaddr[0])
+            if addr.is_private or addr.is_reserved or addr.is_loopback or addr.is_link_local:
+                return True
+    except (socket.gaierror, ValueError, OSError):
+        pass
+    return False
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -61,6 +81,15 @@ def register_tools(mcp: FastMCP) -> None:
             # Validate URL
             if not url.startswith(("http://", "https://")):
                 url = "https://" + url
+
+            # SSRF protection: block requests to private/internal networks
+            parsed_host = urlparse(url).hostname
+            if parsed_host and _resolves_to_private_ip(parsed_host):
+                return {
+                    "error": "Blocked: URL resolves to a private/internal IP address",
+                    "url": url,
+                    "skipped": True,
+                }
 
             # Validate max_length
             max_length = max(1000, min(max_length, 500000))
